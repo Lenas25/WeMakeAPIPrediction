@@ -1,0 +1,25 @@
+[project]
+name = "we-make-api-prediction"
+version = "0.1.0"
+description = ""
+authors = [{ name = "Lena", email = "easp0104@gmail.com" }]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi (>=0.120.3,<0.121.0)",
+    "uvicorn (>=0.38.0,<0.39.0)",
+    "pandas (>=2.3.3,<3.0.0)",
+    "scikit-learn (>=1.7.2,<2.0.0)",
+    "numpy (>=2.3.4,<3.0.0)",
+    "firebase-admin (>=7.1.0,<8.0.0)",
+]
+
+[tool.poetry.scripts]
+start = "we_make_api_prediction.main:main"
+
+[tool.poetry]
+packages = [{ include = "we_make_api_prediction", from = "src" }]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

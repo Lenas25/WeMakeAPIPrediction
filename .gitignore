@@ -1,0 +1,9 @@
+# Entornos virtuales de Python
+.venv/
+venv/
+__pycache__/
+
+# Archivos de configuración de IDE
+.vscode/
+.idea/
+src/we_make_api_prediction/serviceAccountKey.jsonsrc/we_make_api_prediction/serviceAccountKey.json
