@@ -23,3 +23,10 @@ packages = [{ include = "we_make_api_prediction", from = "src" }]
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poe.tasks]
+dev = "uvicorn src.we_make_api_prediction.main:app --host 0.0.0.0 --port 8000 --reload"
+seed-db = "python src/we_make_api_prediction/seed_db.py"
+
+[dependency-groups]
+dev = ["poethepoet (>=0.37.0,<0.38.0)"]

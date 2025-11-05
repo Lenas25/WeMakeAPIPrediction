@@ -6,4 +6,4 @@ __pycache__/
 # Archivos de configuración de IDE
 .vscode/
 .idea/
-src/we_make_api_prediction/serviceAccountKey.jsonsrc/we_make_api_prediction/serviceAccountKey.json
+src/we_make_api_prediction/serviceAccountKey.json

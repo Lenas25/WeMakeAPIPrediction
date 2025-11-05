@@ -26,7 +26,7 @@ import joblib  # Para guardar y cargar una vez que ha aprendido
 app = FastAPI()
 
 # Nos conectamos a Firebase.
-cred = credentials.Certificate("./serviceAccountKey.json")
+cred = credentials.Certificate("src/we_make_api_prediction/serviceAccountKey.json")
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
@@ -80,22 +80,25 @@ def train_risk_prediction_model(df_history):
 
     print("Entrenando un nuevo modelo de riesgo...")
     df_train = df_history.copy()
-    
     # Solo podemos aprender de tareas que ya terminaron y tenían una fecha límite.
-    df_train = df_train.dropna(subset=['approvedAt', 'deadline'])
-
-    # Traducimos los datos a números que el modelo entienda.
-    df_train = prepare_features_for_model(df_train)
-    features_to_use = ['priority_encoded', 'days_to_deadline', 'subtasks_count']
-    X = df_train[features_to_use]
-
-    # La "respuesta correcta": ¿La tarea se retrasó (1) o no (0)?
-    # Usamos .tz_localize(None) para comparar sin problemas de zona horaria.
-    df_train['is_late'] = (df_train['approvedAt'].dt.tz_localize(None) > df_train['deadline'].dt.tz_localize(None)).astype(int)
-    y = df_train['is_late']
-    
-    if len(df_train) < 10 or len(y.unique()) < 2:
-        print("No hay suficientes datos para entrenar un modelo significativo.")
+    df_train = df_train[df_train['status'] == 'completed'].copy()
+    if 'completedAt' in df_train.columns:
+        df_train = df_train.dropna(subset=['completedAt', 'deadline'])
+        # Traducimos los datos a números que el modelo entienda.
+        df_train = prepare_features_for_model(df_train)
+        features_to_use = ['priority_encoded', 'days_to_deadline', 'subtasks_count']
+        X = df_train[features_to_use]
+        # La "respuesta correcta": ¿La tarea se retrasó (1) o no (0)?
+        # Usamos .tz_localize(None) para comparar sin problemas de zona horaria.
+        df_train['is_late'] = (df_train['completedAt'].dt.tz_localize(None) > df_train['deadline'].dt.tz_localize(None)).astype(int)
+        y = df_train['is_late']
+        if len(df_train) < 10 or len(y.unique()) < 2:
+            print("No hay suficientes datos para entrenar un modelo significativo.")
+            class DummyModel: # type: ignore
+                def predict(self, X): return np.zeros(len(X))
+            return DummyModel()
+    else:
+        print("No hay campo 'completedAt' en los datos de entrenamiento.")
         class DummyModel:
             def predict(self, X): return np.zeros(len(X))
         return DummyModel()
@@ -144,23 +147,45 @@ async def get_dashboard_data(board_id: str):
         # Corregir los tipos de datos de fecha
         df['createdAt'] = pd.to_datetime(df['createdAt'], errors='coerce')
         df['deadline'] = pd.to_datetime(df['deadline'], errors='coerce')
-        df['approvedAt'] = pd.to_datetime(df['approvedAt'], errors='coerce')
+        # Solo convertir completedAt si existe y si la tarea está completada
+        if 'completedAt' in df.columns:
+            df.loc[df['status'] == 'completed', 'completedAt'] = pd.to_datetime(df.loc[df['status'] == 'completed', 'completedAt'], errors='coerce')
         df = df.dropna(subset=['createdAt']) # Ignorar tareas con fecha de creación corrupta
 
         # --- Parte 1: Usar la "Máquina de Contar" (Métricas) ---
         
         # Tareas completadas en las últimas 4 semanas
         df_completed = df[df['status'] == 'completed'].copy()
-        df_completed['completed_week'] = df_completed['approvedAt'].dt.to_period('W-Mon')
-        tasks_per_week = df_completed.groupby('completed_week').size().tail(4)
         
+        if not df_completed.empty and 'completedAt' in df_completed.columns:
+            df_completed = df_completed.dropna(subset=['completedAt', 'deadline'])
+            # Creamos una clave única para cada semana, ej: (2025, 42)
+            df_completed['year_week'] = df_completed['completedAt'].dt.isocalendar().apply(
+                lambda x: (x.year, x.week), axis=1
+            )
+            tasks_per_week_series = df_completed.groupby('year_week').size().tail(4)
+            
+            # Formateamos las claves para el JSON, ej: (2025, 42) -> "S42"
+            tasks_per_week = {}
+            for idx, count in tasks_per_week_series.items():
+                # idx puede ser una tupla (year, week) o algún otro tipo hashable; manejamos ambos casos
+                if isinstance(idx, (list, tuple)) and len(idx) >= 2:
+                    week = idx[1]
+                else:
+                    # intentar usar atributo 'week' si existe, sino usar la representación de cadena
+                    week = getattr(idx, 'week', None)
+                    if week is None:
+                        week = str(idx)
+                tasks_per_week[f"S{week}"] = int(count)
+
+            # Calcular la tasa de finalización a tiempo (porcentaje)
+            df_completed.loc[:, 'on_time'] = (df_completed['completedAt'].dt.tz_localize(None) <= df_completed['deadline'].dt.tz_localize(None))
+            on_time_rate = df_completed['on_time'].mean() * 100 if not df_completed.empty else 100
+        else:
+            tasks_per_week = {}
+            on_time_rate = 100
         # Distribución de tareas por prioridad
         priority_distribution = df['priority'].value_counts().to_dict()
-        
-        # Tasa de cumplimiento (porcentaje de tareas completadas a tiempo)
-        on_time_tasks = df_completed[df_completed['approvedAt'].dt.tz_localize(None) <= df_completed['deadline'].dt.tz_localize(None)].shape[0]
-        total_completed = df_completed.shape[0]
-        on_time_rate = (on_time_tasks / total_completed) * 100 if total_completed > 0 else 100
 
         # --- Parte 2: Usar Predicciones ---
         
@@ -189,7 +214,7 @@ async def get_dashboard_data(board_id: str):
             },
             "productivity": {
                 # Convertimos las claves de fecha a texto para que el JSON sea válido
-                "tasks_completed_per_week": {str(k): int(v) for k, v in tasks_per_week.items()},
+               "tasks_completed_per_week": tasks_per_week,
                 "priority_distribution": {str(k): int(v) for k, v in priority_distribution.items()},
                 "on_time_completion_rate": round(on_time_rate, 2)
             },
