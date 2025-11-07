@@ -269,18 +269,48 @@ async def get_user_summary_in_board(board_id: str, user_id: str):
         tasks_involved = len(df_user)
         df_user_completed = df_user[df_user['status'] == 'completed']
         tasks_completed = len(df_user_completed)
+
+        now = datetime.now()
+        overdue_tasks = len(df_user[
+            (df_user['deadline'].dt.tz_localize(None) < now) &
+            (df_user['status'] != 'completed')
+        ])
         
         # Tasa de cumplimiento personal
-        on_time_tasks = df_user_completed[df_user_completed['completedAt'].dt.tz_localize(None) <= df_user_completed['deadline'].dt.tz_localize(None)].shape[0]
+        # Hacemos una comparación segura por fila convirtiendo a timestamps numéricos
+        on_time_tasks = 0
+        for _, row in df_user_completed.iterrows():
+            # Convert entries to pandas Timestamp safely; pd.Timestamp handles many input types.
+            try:
+                comp_val = row.get('completedAt', None)
+                comp_ts = pd.Timestamp(comp_val) if comp_val is not None else pd.NaT
+            except Exception:
+                comp_ts = pd.NaT
+
+            try:
+                dl_val = row.get('deadline', None)
+                dl_ts = pd.Timestamp(dl_val) if dl_val is not None else pd.NaT
+            except Exception:
+                dl_ts = pd.NaT
+
+            if pd.isna(comp_ts) or pd.isna(dl_ts):
+                continue
+            try:
+                # Usar .value (nanoseconds since epoch) evita problemas de zona horaria al comparar
+                if int(comp_ts.value) <= int(dl_ts.value):
+                    on_time_tasks += 1
+            except Exception:
+                # En caso de cualquier problema al convertir, ignoramos esa fila
+                continue
         on_time_rate = (on_time_tasks / tasks_completed) * 100 if tasks_completed > 0 else 100
 
         return {
             "user_id": user_id,
             "tasks_involved": tasks_involved,
             "tasks_completed": tasks_completed,
+            "overdue_tasks": overdue_tasks,
             "on_time_rate": round(on_time_rate, 2),
         }
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ocurrió un error: {e}")
 
