@@ -125,6 +125,7 @@ def train_risk_prediction_model(df_history):
 #   Paso 3: Abrir el Endpoint de la API
 # =============================================================================
 
+# --- Endpoint 1: Dashboard General (Tu código existente, sin cambios) ---
 @app.get("/dashboard/{board_id}")
 async def get_dashboard_data(board_id: str):
     """
@@ -228,6 +229,111 @@ async def get_dashboard_data(board_id: str):
     except Exception as e:
         print(f"Ocurrió un error: {e}")
         raise HTTPException(status_code=500, detail=f"Ocurrió un error interno: {e}")
+
+# --- Endpoint 2: - Resumen de un Usuario Específico ---
+@app.get("/summary/{board_id}/{user_id}")
+async def get_user_summary_in_board(board_id: str, user_id: str):
+    """
+    Calcula y devuelve las estadísticas de un solo usuario dentro de un tablero.
+    """
+    try:
+        # 1. Obtener todas las tareas del tablero
+        tasks_ref = db.collection('tasks').where('boardId', '==', board_id)
+        docs = tasks_ref.stream()
+        tasks_list = [doc.to_dict() for doc in docs]
+
+        if not tasks_list:
+            return {"message": "No hay tareas en este tablero para analizar."}
+
+        df = pd.DataFrame(tasks_list)
+        # Asegurar que las columnas existen antes de convertir
+        df['completedAt'] = pd.to_datetime(df['completedAt'], errors='coerce') if 'completedAt' in df.columns else pd.NaT
+        df['deadline'] = pd.to_datetime(df['deadline'], errors='coerce') if 'deadline' in df.columns else pd.NaT
+
+        # 2. Filtrar las tareas que pertenecen a ESTE usuario
+        # Una tarea le "pertenece" si es miembro asignado O es el revisor.
+        df_user = df[
+            (df['assignedMembers'].apply(lambda members: user_id in members if isinstance(members, list) else False)) |
+            (df['reviewerId'] == user_id)
+        ].copy()
+
+        if df_user.empty:
+            return {
+                "user_id": user_id,
+                "tasks_involved": 0,
+                "tasks_completed": 0,
+                "on_time_rate": 100.0,
+            }
+
+        # 3. Calcular las métricas personales
+        tasks_involved = len(df_user)
+        df_user_completed = df_user[df_user['status'] == 'completed']
+        tasks_completed = len(df_user_completed)
+        
+        # Tasa de cumplimiento personal
+        on_time_tasks = df_user_completed[df_user_completed['completedAt'].dt.tz_localize(None) <= df_user_completed['deadline'].dt.tz_localize(None)].shape[0]
+        on_time_rate = (on_time_tasks / tasks_completed) * 100 if tasks_completed > 0 else 100
+
+        return {
+            "user_id": user_id,
+            "tasks_involved": tasks_involved,
+            "tasks_completed": tasks_completed,
+            "on_time_rate": round(on_time_rate, 2),
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ocurrió un error: {e}")
+
+
+# --- Endpoint 3: - Leaderboard (Clasificación de Miembros) ---
+@app.get("/leaderboard/{board_id}")
+async def get_leaderboard(board_id: str):
+    """
+    Devuelve una lista de miembros de un tablero ordenados por sus puntos.
+    """
+
+    try:
+        members_details_ref = db.collection("boards").document(board_id).collection("members_details")
+        members_docs = members_details_ref.stream()
+
+        member_points_list = []
+        user_ids_to_fetch = []
+        for doc in members_docs:
+            member_data = doc.to_dict()
+            member_points_list.append({
+                "user_id": doc.id,
+                "points": member_data.get("points", 0)
+            })
+            user_ids_to_fetch.append(doc.id)
+
+        if not user_ids_to_fetch:
+            return [] # Devolver una lista vacía si no hay miembros
+
+        users_ref = db.collection("users").where("__name__", "in", user_ids_to_fetch)
+        user_docs = users_ref.stream()
+        
+        user_info_map = {doc.id: doc.to_dict() for doc in user_docs}
+
+        leaderboard = []
+        for member in member_points_list:
+            user_id = member["user_id"]
+            user_data = user_info_map.get(user_id)
+            if user_data:
+                leaderboard.append({
+                    "name": user_data.get("name", "Usuario Desconocido"),
+                    "photoUrl": user_data.get("photoUrl", ""),
+                    "points": member["points"]
+                })
+
+        leaderboard.sort(key=lambda x: x["points"], reverse=True)
+
+        for i, entry in enumerate(leaderboard):
+            entry["rank"] = i + 1
+
+        return leaderboard
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ocurrió un error: {e}")
 
 # =============================================================================
 #   Paso 4: Iniciar el Servidor
