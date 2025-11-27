@@ -15,8 +15,6 @@ dependencies = [
     "gunicorn (>=22.0.0,<23.0.0)",
 ]
 
-[tool.poetry.scripts]
-start = "we_make_api_prediction.main:main"
 
 [tool.poetry]
 packages = [{ include = "we_make_api_prediction", from = "src" }]
