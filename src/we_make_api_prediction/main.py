@@ -1,35 +1,55 @@
 # =============================================================================
 #   Paso 1: Importar las herramientas que necesitamos
 # =============================================================================
-import uvicorn
-from fastapi import FastAPI, HTTPException
-from datetime import datetime
 import os
+from datetime import datetime
 
 # Herramientas para conectar a Firebase
 import firebase_admin
-from firebase_admin import credentials, firestore
-
+import joblib  # Para guardar y cargar una vez que ha aprendido
+import numpy as np
 # Herramientas para organizar y analizar datos
 import pandas as pd
-import numpy as np
-
-# Herramientas para construir Machine Learning
-from sklearn.model_selection import train_test_split
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from firebase_admin import credentials, firestore
+from google.cloud.firestore import FieldFilter
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
-import joblib  # Para guardar y cargar una vez que ha aprendido
+# Herramientas para construir Machine Learning
+from sklearn.model_selection import train_test_split
 
 # --- Configuración Inicial ---
 
 # Creamos la aplicación de API
 app = FastAPI()
 
-# Nos conectamos a Firebase.
-cred = credentials.Certificate("src/we_make_api_prediction/serviceAccountKey.json")
+carpeta_actual = os.path.dirname(os.path.abspath(__file__))
+
+SERVICE_ACCOUNT_KEY_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY")
+
+if SERVICE_ACCOUNT_KEY_JSON:
+    # Si la variable de entorno existe (estamos en Render)
+    import json
+
+    # La credencial espera un diccionario, por lo que cargamos la cadena JSON
+    service_account_info = json.loads(SERVICE_ACCOUNT_KEY_JSON)
+    cred = credentials.Certificate(service_account_info)
+    print("Firebase inicializado usando la variable de entorno.")
+else:
+    # Si la variable no existe (usamos el archivo local para desarrollo)
+    # Importamos solo si es necesario para evitar problemas de dependencias en Render.
+    from firebase_admin import credentials
+    carpeta_actual = os.path.dirname(os.path.abspath(__file__))
+    # Asume que tu archivo está en la raíz de /src/ o directamente en src/we_make_api_prediction/
+    # Según tu captura de pantalla, está en el mismo directorio que main.py
+    ruta_json = os.path.join(carpeta_actual, "serviceAccountKey.json")
+    cred = credentials.Certificate(ruta_json)
+    print("Firebase inicializado usando el archivo local serviceAccountKey.json.")
+
+# Inicializar Firebase
 firebase_admin.initialize_app(cred)
 db = firestore.client()
-
 
 # =============================================================================
 #   Paso 2: Construir
@@ -47,17 +67,21 @@ def prepare_features_for_model(df):
     # 1. Traducir Prioridad: "low" -> 0, "medium" -> 1, "high" -> 2
     priority_mapping = {'low': 0, 'medium': 1, 'high': 2}
     # Si no tiene prioridad, asumimos "medium" (1)
-    df_features['priority_encoded'] = df_features['priority'].map(priority_mapping).fillna(1)
+    df_features['priority_encoded'] = df_features['priority'].map(
+        priority_mapping).fillna(1)
 
     # 2. Calcular Días para la Fecha Límite:
     # ¿Cuántos días faltan para la fecha límite? Si es en el futuro, es un número positivo.
     # Si ya pasó, es un número negativo.
     # Usamos .tz_localize(None) para poder comparar las fechas sin problemas de zona horaria.
-    df_features['days_to_deadline'] = (df_features['deadline'].dt.tz_localize(None) - datetime.now()).dt.days
-    df_features['days_to_deadline'] = df_features['days_to_deadline'].fillna(30)
+    df_features['days_to_deadline'] = (
+        df_features['deadline'].dt.tz_localize(None) - datetime.now()).dt.days
+    df_features['days_to_deadline'] = df_features['days_to_deadline'].fillna(
+        30)
 
     # 3. Contar Subtareas: ¿Cuántas subtareas tiene? Más subtareas = más complejo.
-    df_features['subtasks_count'] = df_features['subtasks'].apply(lambda x: len(x) if isinstance(x, list) else 0)
+    df_features['subtasks_count'] = df_features['subtasks'].apply(
+        lambda x: len(x) if isinstance(x, list) else 0)
 
     return df_features
 
@@ -86,33 +110,40 @@ def train_risk_prediction_model(df_history):
         df_train = df_train.dropna(subset=['completedAt', 'deadline'])
         # Traducimos los datos a números que el modelo entienda.
         df_train = prepare_features_for_model(df_train)
-        features_to_use = ['priority_encoded', 'days_to_deadline', 'subtasks_count']
+        features_to_use = ['priority_encoded',
+                           'days_to_deadline', 'subtasks_count']
         X = df_train[features_to_use]
         # La "respuesta correcta": ¿La tarea se retrasó (1) o no (0)?
         # Usamos .tz_localize(None) para comparar sin problemas de zona horaria.
-        df_train['is_late'] = (df_train['completedAt'].dt.tz_localize(None) > df_train['deadline'].dt.tz_localize(None)).astype(int)
+        df_train['is_late'] = (df_train['completedAt'].dt.tz_localize(
+            None) > df_train['deadline'].dt.tz_localize(None)).astype(int)
         y = df_train['is_late']
         if len(df_train) < 10 or len(y.unique()) < 2:
             print("No hay suficientes datos para entrenar un modelo significativo.")
-            class DummyModel: # type: ignore
+
+            class DummyModel:  # type: ignore
                 def predict(self, X): return np.zeros(len(X))
             return DummyModel()
     else:
         print("No hay campo 'completedAt' en los datos de entrenamiento.")
+
         class DummyModel:
             def predict(self, X): return np.zeros(len(X))
         return DummyModel()
 
     # Dividimos: una parte para enseñar, otra para hacer un examen.
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42)
 
     # Creamos un clasificador de Bosque Aleatorio algoritmo que te ayuda a tomar decisiones basadas en datos
-    model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')
+    model = RandomForestClassifier(
+        n_estimators=100, random_state=42, class_weight='balanced')
     model.fit(X_train, y_train)
 
     # Le hacemos el examen para ver qué tan bien aprendió.
     predictions = model.predict(X_test)
-    print(f"Precisión del nuevo modelo de riesgo: {accuracy_score(y_test, predictions) * 100:.2f}%")
+    print(
+        f"Precisión del nuevo modelo de riesgo: {accuracy_score(y_test, predictions) * 100:.2f}%")
 
     # Guardamos ya entrenada para la próxima vez.
     os.makedirs("models", exist_ok=True)
@@ -137,51 +168,55 @@ async def get_dashboard_data(board_id: str):
         tasks_ref = db.collection('tasks').where('boardId', '==', board_id)
         docs = tasks_ref.stream()
         tasks_list = [doc.to_dict() for doc in docs]
-        
+
         if not tasks_list:
             # Si no hay tareas, no podemos calcular nada.
             return {"message": "No hay tareas en este tablero para analizar."}
 
         # --- Usar Pandas, nuestra "Hoja de Cálculo" ---
         df = pd.DataFrame(tasks_list)
-        
+
         # Corregir los tipos de datos de fecha
         df['createdAt'] = pd.to_datetime(df['createdAt'], errors='coerce')
         df['deadline'] = pd.to_datetime(df['deadline'], errors='coerce')
         # Solo convertir completedAt si existe y si la tarea está completada
         if 'completedAt' in df.columns:
-            df.loc[df['status'] == 'completed', 'completedAt'] = pd.to_datetime(df.loc[df['status'] == 'completed', 'completedAt'], errors='coerce')
-        df = df.dropna(subset=['createdAt']) # Ignorar tareas con fecha de creación corrupta
+            df.loc[df['status'] == 'completed', 'completedAt'] = pd.to_datetime(
+                df.loc[df['status'] == 'completed', 'completedAt'], errors='coerce')
+        # Ignorar tareas con fecha de creación corrupta
+        df = df.dropna(subset=['createdAt'])
 
         # --- Parte 1: Usar la "Máquina de Contar" (Métricas) ---
-        
+
         # Tareas completadas en las últimas 4 semanas
         df_completed = df[df['status'] == 'completed'].copy()
-        
+
         if not df_completed.empty and 'completedAt' in df_completed.columns:
-            df_completed = df_completed.dropna(subset=['completedAt', 'deadline'])
+            df_completed = df_completed.dropna(
+                subset=['completedAt', 'deadline'])
             # Creamos una clave única para cada semana, ej: (2025, 42)
             df_completed['year_week'] = df_completed['completedAt'].dt.isocalendar().apply(
                 lambda x: (x.year, x.week), axis=1
             )
-            tasks_per_week_series = df_completed.groupby('year_week').size().tail(4)
-            
-            # Formateamos las claves para el JSON, ej: (2025, 42) -> "S42"
+            tasks_per_week_series = df_completed.groupby(
+                'year_week').size().tail(4)
+
             tasks_per_week = {}
             for idx, count in tasks_per_week_series.items():
                 # idx puede ser una tupla (year, week) o algún otro tipo hashable; manejamos ambos casos
                 if isinstance(idx, (list, tuple)) and len(idx) >= 2:
                     week = idx[1]
                 else:
-                    # intentar usar atributo 'week' si existe, sino usar la representación de cadena
                     week = getattr(idx, 'week', None)
                     if week is None:
                         week = str(idx)
                 tasks_per_week[f"S{week}"] = int(count)
 
             # Calcular la tasa de finalización a tiempo (porcentaje)
-            df_completed.loc[:, 'on_time'] = (df_completed['completedAt'].dt.tz_localize(None) <= df_completed['deadline'].dt.tz_localize(None))
-            on_time_rate = df_completed['on_time'].mean() * 100 if not df_completed.empty else 100
+            df_completed.loc[:, 'on_time'] = (df_completed['completedAt'].dt.tz_localize(
+                None) <= df_completed['deadline'].dt.tz_localize(None))
+            on_time_rate = df_completed['on_time'].mean(
+            ) * 100 if not df_completed.empty else 100
         else:
             tasks_per_week = {}
             on_time_rate = 100
@@ -189,25 +224,27 @@ async def get_dashboard_data(board_id: str):
         priority_distribution = df['priority'].value_counts().to_dict()
 
         # --- Parte 2: Usar Predicciones ---
-        
+
         # Primero, le enseñamos con el historial de tareas
         risk_model = train_risk_prediction_model(df)
-        
+
         # Ahora, le mostramos las tareas que aún no están terminadas para que adivine.
         df_pending = df[df['status'] != 'completed'].copy()
         at_risk_tasks = []
         if not df_pending.empty:
             df_predict = prepare_features_for_model(df_pending)
-            features_to_use = ['priority_encoded', 'days_to_deadline', 'subtasks_count']
-            
+            features_to_use = ['priority_encoded',
+                               'days_to_deadline', 'subtasks_count']
+
             predictions = risk_model.predict(df_predict[features_to_use])
             df_pending['risk_prediction'] = predictions
-            
+
             # De la lista de tareas pendientes, nos quedamos con las que la Bola de Cristal dijo que "se romperán" (riesgo = 1)
-            at_risk_tasks = df_pending[df_pending['risk_prediction'] == 1][['title', 'priority']].head(3).to_dict('records')
+            at_risk_tasks = df_pending[df_pending['risk_prediction'] == 1][[
+                'title', 'priority']].head(3).to_dict('records')
 
         # --- Parte 3: Juntar todo en un solo paquete (JSON) para enviarlo a la app de Android ---
-        
+
         dashboard_json = {
             "summary": {
                 "total_tasks": len(df),
@@ -215,7 +252,7 @@ async def get_dashboard_data(board_id: str):
             },
             "productivity": {
                 # Convertimos las claves de fecha a texto para que el JSON sea válido
-               "tasks_completed_per_week": tasks_per_week,
+                "tasks_completed_per_week": tasks_per_week,
                 "priority_distribution": {str(k): int(v) for k, v in priority_distribution.items()},
                 "on_time_completion_rate": round(on_time_rate, 2)
             },
@@ -223,14 +260,17 @@ async def get_dashboard_data(board_id: str):
                 "at_risk_tasks": at_risk_tasks
             }
         }
-        
+
         return dashboard_json
 
     except Exception as e:
         print(f"Ocurrió un error: {e}")
-        raise HTTPException(status_code=500, detail=f"Ocurrió un error interno: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Ocurrió un error interno: {e}")
 
 # --- Endpoint 2: - Resumen de un Usuario Específico ---
+
+
 @app.get("/summary/{board_id}/{user_id}")
 async def get_user_summary_in_board(board_id: str, user_id: str):
     """
@@ -247,8 +287,10 @@ async def get_user_summary_in_board(board_id: str, user_id: str):
 
         df = pd.DataFrame(tasks_list)
         # Asegurar que las columnas existen antes de convertir
-        df['completedAt'] = pd.to_datetime(df['completedAt'], errors='coerce') if 'completedAt' in df.columns else pd.NaT
-        df['deadline'] = pd.to_datetime(df['deadline'], errors='coerce') if 'deadline' in df.columns else pd.NaT
+        df['completedAt'] = pd.to_datetime(
+            df['completedAt'], errors='coerce') if 'completedAt' in df.columns else pd.NaT
+        df['deadline'] = pd.to_datetime(
+            df['deadline'], errors='coerce') if 'deadline' in df.columns else pd.NaT
 
         # 2. Filtrar las tareas que pertenecen a ESTE usuario
         # Una tarea le "pertenece" si es miembro asignado O es el revisor.
@@ -275,7 +317,7 @@ async def get_user_summary_in_board(board_id: str, user_id: str):
             (df_user['deadline'].dt.tz_localize(None) < now) &
             (df_user['status'] != 'completed')
         ])
-        
+
         # Tasa de cumplimiento personal
         # Hacemos una comparación segura por fila convirtiendo a timestamps numéricos
         on_time_tasks = 0
@@ -283,7 +325,8 @@ async def get_user_summary_in_board(board_id: str, user_id: str):
             # Convert entries to pandas Timestamp safely; pd.Timestamp handles many input types.
             try:
                 comp_val = row.get('completedAt', None)
-                comp_ts = pd.Timestamp(comp_val) if comp_val is not None else pd.NaT
+                comp_ts = pd.Timestamp(
+                    comp_val) if comp_val is not None else pd.NaT
             except Exception:
                 comp_ts = pd.NaT
 
@@ -302,7 +345,8 @@ async def get_user_summary_in_board(board_id: str, user_id: str):
             except Exception:
                 # En caso de cualquier problema al convertir, ignoramos esa fila
                 continue
-        on_time_rate = (on_time_tasks / tasks_completed) * 100 if tasks_completed > 0 else 100
+        on_time_rate = (on_time_tasks / tasks_completed) * \
+            100 if tasks_completed > 0 else 100
 
         return {
             "user_id": user_id,
@@ -323,7 +367,8 @@ async def get_leaderboard(board_id: str):
     """
 
     try:
-        members_details_ref = db.collection("boards").document(board_id).collection("members_details")
+        members_details_ref = db.collection("boards").document(
+            board_id).collection("members_details")
         members_docs = members_details_ref.stream()
 
         member_points_list = []
@@ -337,11 +382,12 @@ async def get_leaderboard(board_id: str):
             user_ids_to_fetch.append(doc.id)
 
         if not user_ids_to_fetch:
-            return [] # Devolver una lista vacía si no hay miembros
+            return []  # Devolver una lista vacía si no hay miembros
 
-        users_ref = db.collection("users").where("__name__", "in", user_ids_to_fetch)
+        users_ref = db.collection("users").where(
+            "__name__", "in", user_ids_to_fetch)
         user_docs = users_ref.stream()
-        
+
         user_info_map = {doc.id: doc.to_dict() for doc in user_docs}
 
         leaderboard = []
